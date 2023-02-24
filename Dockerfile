@@ -1,6 +1,8 @@
+# This version only works with 24.0.1
+# To work with another version, change the signer keys to match
 ARG VERSION=24.0.1
 
-# Begin download and verification stage
+# Begin download / verification stage
 FROM debian:bullseye-slim as download
 ARG VERSION
 
@@ -37,17 +39,25 @@ RUN set -ex \
       gpg --batch --keyserver hkp://p80.pool.sks-keyservers.net:80 --recv-keys "$key" ; \
     done
 
-# Download and verify source code
+# Download Bitcoin Core source code
 RUN wget https://bitcoincore.org/bin/bitcoin-core-$VERSION/bitcoin-$VERSION.tar.gz \
   && wget https://bitcoincore.org/bin/bitcoin-core-$VERSION/SHA256SUMS \
   && wget https://bitcoincore.org/bin/bitcoin-core-$VERSION/SHA256SUMS.asc
 
+# Verify that the build hash was signed by all signer keys
 RUN gpg --verify SHA256SUMS.asc SHA256SUMS \
   && grep " bitcoin-$VERSION.tar.gz" SHA256SUMS | sha256sum -c - \
   && tar -xzf bitcoin-$VERSION.tar.gz
 
-# Apply the Ordisrespector patch
 WORKDIR /download/bitcoin-$VERSION
+
+# Apply the Ordisrespector patch
+# https://gist.github.com/luke-jr/4c022839584020444915c84bdd825831
+# The patch works as follows: while evaluating a Bitcoin script,
+# look for any opcode statements of the form
+#     OP_FALSE OP_IF <...> OP_ENDIF
+# and skip them. This is safe since such a statement can never be
+# executed, equivalent to `if (false) { ... }` in something like C.
 COPY Ordisrespector.patch Ordisrespector.patch
 RUN git apply Ordisrespector.patch
 
@@ -66,7 +76,8 @@ RUN apt-get update -y \
       bsdmainutils \
       python3 \
       libevent-dev \
-      libboost-dev
+      libboost-dev \
+      libzmq3-dev
 
 WORKDIR /bitcoin
 COPY --from=download /download/bitcoin-$VERSION /bitcoin
@@ -83,9 +94,11 @@ RUN ./autogen.sh \
     --with-gui=no \
     --with-qrencode=no \
     --with-utils=yes \
+    --with-zmq=yes \
+    --without-bdb
   && make
 
-# Remove the debug symbols
+# Remove the debug symbols to reduce image size
 RUN strip src/bitcoin-cli \
   && strip src/bitcoin-tx \
   && strip src/bitcoin-util \
@@ -98,7 +111,11 @@ ARG VERSION
 # Run as a non-privileged user
 RUN useradd -r bitcoin \
   && apt-get update -y \
-  && apt-get install -y libevent-2.1-7 libevent-pthreads-2.1-7 gosu \
+  && apt-get install -y \
+      libevent-2.1-7 \
+      libevent-pthreads-2.1-7 \
+      libzmq3-dev \
+      gosu \
   && apt-get clean \
   && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
@@ -106,7 +123,7 @@ ENV BITCOIN_DATA=/home/bitcoin/.bitcoin
 ENV BITCOIN_BIN=/opt/bitcoin-$VERSION/bin
 ENV PATH=$BITCOIN_BIN:$PATH
 
-# Copy the binaries built in this Dockerfile
+# Copy the binaries from the build stage
 COPY --from=build /bitcoin/src/bitcoin-cli $BITCOIN_BIN/bitcoin-cli
 COPY --from=build /bitcoin/src/bitcoin-tx $BITCOIN_BIN/bitcoin-tx
 COPY --from=build /bitcoin/src/bitcoin-util $BITCOIN_BIN/bitcoin-util
